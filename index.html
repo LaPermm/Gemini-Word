@@ -64,11 +64,11 @@
     .btn-action:hover { background: #d2e3fc; }
     button:disabled { background: #dadce0; color: #80868b; cursor: not-allowed; border: none; }
 
-    #status { font-size: 12px; margin-bottom: 6px; min-height: 16px; }
+    #status { font-size: 12px; margin-bottom: 6px; min-height: 16px; word-break: break-word; }
     .status-wait { color: #e37400; font-weight: 500; }
-    .status-error { color: #d93025; font-weight: 500; }
+    .status-error { color: #d93025; font-weight: 600; }
 
-    /* Panel interno de visualización de respuesta */
+    /* Panel de respuesta */
     #responseCard {
       display: none;
       background: #ffffff;
@@ -121,7 +121,7 @@
 
   <h4>Asistente Gemini</h4>
   <input type="password" id="apiKey" placeholder="API Key de Gemini" />
-  <textarea id="prompt" placeholder="Haz una pregunta o deja en blanco para inicializar el contexto..."></textarea>
+  <textarea id="prompt" placeholder="Haz una pregunta o deja en blanco para inicializar contexto..."></textarea>
 
   <label class="context-toggle">
     <input type="checkbox" id="chkFullDoc">
@@ -156,7 +156,11 @@
   </div>
 
   <script>
-    Office.onReady();
+    let currentAppHost = "";
+
+    Office.onReady((info) => {
+      currentAppHost = info.host;
+    });
 
     const apiKeyInput = document.getElementById("apiKey");
     const chkFullDoc = document.getElementById("chkFullDoc");
@@ -169,8 +173,10 @@
 
     function setUIBusy(isBusy, message = "") {
       document.querySelectorAll("button").forEach(b => b.disabled = isBusy);
-      statusEl.className = isBusy ? "status-wait" : "";
-      statusEl.innerText = message;
+      if (message) {
+        statusEl.className = isBusy ? "status-wait" : "";
+        statusEl.innerText = message;
+      }
     }
 
     function getApiKey() {
@@ -179,48 +185,46 @@
       return key;
     }
 
-    // Extrae el contenido global en Word, Excel o PowerPoint de forma segura
+    // Extracción limpia sin propiedades inválidas
     async function getDocumentContext() {
       try {
-        const host = Office.context.diagnostics ? Office.context.diagnostics.host : Office.context.host;
+        // 1. EXCEL
+        if (typeof Excel !== "undefined" && typeof Excel.run === "function") {
+          return await Excel.run(async (context) => {
+            const sheet = context.workbook.getActiveSheet();
+            const range = sheet.getUsedRange();
+            range.load("text");
+            await context.sync();
 
-        // 1. Microsoft Word
-        if (host === "Word" || Office.context.host === Office.HostType.Word) {
+            if (!range.text || range.text.length === 0) return "";
+
+            // Filtra filas que tengan al menos una celda con datos
+            const rows = range.text
+              .filter(row => row.some(cell => cell !== null && cell !== undefined && String(cell).trim() !== ""))
+              .map(row => row.map(cell => (cell ? String(cell).trim() : "")).join(" | "));
+
+            return rows.join("\n");
+          });
+        }
+
+        // 2. WORD
+        if (typeof Word !== "undefined" && typeof Word.run === "function") {
           return await Word.run(async (context) => {
             const body = context.document.body;
             body.load("text");
             await context.sync();
             return body.text ? body.text.trim() : "";
           });
-        } 
-        // 2. Microsoft Excel
-        else if (host === "Excel" || Office.context.host === Office.HostType.Excel) {
-          return await Excel.run(async (context) => {
-            const sheet = context.workbook.getActiveSheet();
-            const range = sheet.getUsedRangeOrNullObject();
-            range.load(["values", "isNullObject"]);
-            await context.sync();
+        }
 
-            if (range.isNullObject || !range.values || range.values.length === 0) {
-              return "";
-            }
-
-            const rows = range.values
-              .filter(row => row.some(cell => cell !== "" && cell !== null && cell !== undefined))
-              .map(row => row.map(cell => (cell === null || cell === undefined) ? "" : cell).join(" | "));
-
-            return rows.join("\n");
-          });
-        } 
-        // 3. Microsoft PowerPoint
-        else if (host === "PowerPoint" || Office.context.host === Office.HostType.PowerPoint) {
+        // 3. POWERPOINT
+        if (typeof PowerPoint !== "undefined" && typeof PowerPoint.run === "function") {
           return await PowerPoint.run(async (context) => {
             const slides = context.presentation.slides;
             slides.load("items");
             await context.sync();
 
             let fullPresentation = [];
-
             for (let i = 0; i < slides.items.length; i++) {
               const slide = slides.items[i];
               const shapes = slide.shapes;
@@ -233,17 +237,13 @@
               await context.sync();
 
               for (let j = 0; j < shapes.items.length; j++) {
-                if (shapes.items[j].textFrame) {
-                  shapes.items[j].textFrame.load("hasText");
-                }
+                if (shapes.items[j].textFrame) shapes.items[j].textFrame.load("hasText");
               }
               await context.sync();
 
               for (let j = 0; j < shapes.items.length; j++) {
                 const tf = shapes.items[j].textFrame;
-                if (tf && tf.hasText) {
-                  tf.textRange.load("text");
-                }
+                if (tf && tf.hasText) tf.textRange.load("text");
               }
               await context.sync();
 
@@ -259,24 +259,24 @@
                 fullPresentation.push(`[Diapositiva ${i + 1}]\n` + slideTexts.join("\n"));
               }
             }
-
             return fullPresentation.join("\n\n");
           });
         }
       } catch (err) {
+        // En Excel, si la hoja está totalmente vacía getUsedRange arroja ItemNotFound
+        if (err.code === "ItemNotFound") return "";
         statusEl.className = "status-error";
-        statusEl.innerText = "Error al leer archivo: " + err.message;
+        statusEl.innerText = "Error al leer documento: " + err.message;
         return "";
       }
       return "";
     }
 
-    // Obtener texto seleccionado manualmente
     function getSelectedTextAsync() {
       return new Promise((resolve) => {
         Office.context.document.getSelectedDataAsync(Office.CoercionType.Text, (result) => {
-          if (result.status === Office.AsyncResultStatus.Succeeded && result.value && result.value.trim()) {
-            resolve(result.value.trim());
+          if (result.status === Office.AsyncResultStatus.Succeeded && result.value && String(result.value).trim()) {
+            resolve(String(result.value).trim());
           } else {
             resolve("");
           }
@@ -344,23 +344,22 @@
       return null;
     }
 
-    // Directiva base de fidelidad estricta compartida
     const STRICT_FIDELITY_DIRECTIVE = 
       "DIRECTIVA DE FIDELIDAD ESTRICTA:\n" +
       "- Responde ÚNICA Y EXCLUSIVAMENTE basándote en la información explícitamente redactada en el documento proporcionado.\n" +
-      "- Prohibido inferir, suponer o incorporar conocimientos externos que no figuren en el texto.\n" +
+      "- Prohibido inferir, suponer o incorporar conocimientos externos que no figuren en el texto o celdas.\n" +
       "- Si la respuesta a una pregunta o dato no se encuentra en el documento, indica expresamente: \"Esa información no aparece en el documento\".\n\n";
 
-    // Botón: Preguntar / Analizar (Con inicialización automática)
+    // Preguntar / Analizar
     document.getElementById("btnAsk").onclick = async () => {
       const promptText = document.getElementById("prompt").value.trim();
 
       if (chkFullDoc.checked) {
         setUIBusy(true, "Leyendo archivo completo...");
         const contextData = await getDocumentContext();
-        setUIBusy(false);
 
         if (!contextData) {
+          setUIBusy(false);
           statusEl.className = "status-error";
           statusEl.innerText = "El archivo actual parece estar vacío o sin celdas activas.";
           return;
@@ -368,18 +367,15 @@
 
         let instruction = "";
 
-        // CASO A: Se presionó sin pregunta -> Inicializar y confirmar lectura
         if (!promptText) {
           instruction = STRICT_FIDELITY_DIRECTIVE +
-            "Has recibido el siguiente archivo como contexto documental exclusivo:\n\n" +
+            "Has recibido el siguiente contenido del archivo como contexto documental exclusivo:\n\n" +
             "--- INICIO DEL ARCHIVO ---\n" + contextData + "\n--- FIN DEL ARCHIVO ---\n\n" +
             "INSTRUCCIÓN:\n" +
-            "1. Confirma brevemente que el archivo ha sido leído y procesado exitosamente.\n" +
-            "2. Presenta un resumen muy conciso (3 o 4 viñetas clave) indicando de qué trata el documento y qué temas o datos principales contiene.\n" +
-            "3. Indica que estás listo para responder preguntas específicas bajo la directiva de fidelidad estricta.";
-        } 
-        // CASO B: Hay una pregunta escrita por el usuario
-        else {
+            "1. Confirma brevemente que el archivo ha sido procesado exitosamente.\n" +
+            "2. Presenta un resumen conciso en 3 o 4 viñetas clave indicando los datos, columnas o temas principales detectados.\n" +
+            "3. Indica que quedas listo para responder preguntas específicas sobre este archivo bajo la directiva de fidelidad estricta.";
+        } else {
           instruction = STRICT_FIDELITY_DIRECTIVE +
             "Contenido del archivo de referencia:\n\n" +
             "--- INICIO DEL ARCHIVO ---\n" + contextData + "\n--- FIN DEL ARCHIVO ---\n\n" +
@@ -390,7 +386,6 @@
         if (resp) showInTaskpane(resp);
 
       } else {
-        // Modo libre sin contexto de archivo
         if (!promptText) {
           statusEl.className = "status-error";
           statusEl.innerText = "Escribe una pregunta o activa la casilla de leer todo el archivo.";
@@ -401,55 +396,52 @@
       }
     };
 
-    // Botón: Reescribir
+    // Acciones automáticas
     document.getElementById("btnRewrite").onclick = async () => {
       const target = await resolveTargetText();
       if (!target) {
         statusEl.className = "status-error";
-        statusEl.innerText = "Selecciona texto o activa la casilla de leer todo el archivo.";
+        statusEl.innerText = "Selecciona celdas o activa la casilla de leer todo el archivo.";
         return;
       }
-      const resp = await callGemini("Mejora la redacción, estilo profesional, claridad y ortografía del siguiente texto manteniendo fielmente el sentido original:\n\n" + target.text);
+      const resp = await callGemini("Mejora la redacción, estilo profesional, claridad y ortografía del siguiente contenido manteniendo el sentido original:\n\n" + target.text);
       if (resp) showInTaskpane(resp);
     };
 
-    // Botón: Resumen ejecutivo
     document.getElementById("btnSummary").onclick = async () => {
       const target = await resolveTargetText();
       if (!target) {
         statusEl.className = "status-error";
-        statusEl.innerText = "Selecciona texto o activa la casilla de leer todo el archivo.";
+        statusEl.innerText = "Selecciona celdas o activa la casilla de leer todo el archivo.";
         return;
       }
-      const resp = await callGemini(STRICT_FIDELITY_DIRECTIVE + "Genera un resumen ejecutivo formal y estructurado en viñetas basándote exclusivamente en este texto:\n\n" + target.text);
+      const resp = await callGemini(STRICT_FIDELITY_DIRECTIVE + "Genera un resumen ejecutivo formal y estructurado en viñetas basándote exclusivamente en estos datos:\n\n" + target.text);
       if (resp) showInTaskpane(resp);
     };
 
-    // Botón: Verificar coherencia
     document.getElementById("btnVerify").onclick = async () => {
       const target = await resolveTargetText();
       if (!target) {
         statusEl.className = "status-error";
-        statusEl.innerText = "Selecciona texto o activa la casilla de leer todo el archivo.";
+        statusEl.innerText = "Selecciona celdas o activa la casilla de leer todo el archivo.";
         return;
       }
-      const resp = await callGemini(STRICT_FIDELITY_DIRECTIVE + "Actúa como revisor crítico y objetivo. Analiza la coherencia interna del siguiente texto y detalla: 1) Coherencia lógica y vacíos argumentales, 2) Inconsistencias o contradicciones directas, y 3) Recomendaciones puntuales para reforzarlo:\n\n" + target.text);
+      const resp = await callGemini(STRICT_FIDELITY_DIRECTIVE + "Actúa como revisor crítico e imparcial. Analiza la coherencia de estos datos y detalla: 1) Coherencia lógica, 2) Inconsistencias o anomalías numéricas/conceptuales, y 3) Recomendaciones puntuales:\n\n" + target.text);
       if (resp) showInTaskpane(resp);
     };
 
-    // Botón: Generar tabla
     document.getElementById("btnTable").onclick = async () => {
       const target = await resolveTargetText();
       if (!target) {
         statusEl.className = "status-error";
-        statusEl.innerText = "Selecciona texto o activa la casilla de leer todo el archivo.";
+        statusEl.innerText = "Selecciona celdas o activa la casilla de leer todo el archivo.";
         return;
       }
-      const resp = await callGemini(STRICT_FIDELITY_DIRECTIVE + "Extrae los datos estructurados o comparativos del siguiente contenido y organízalos en una tabla Markdown con encabezados claros:\n\n" + target.text);
+      const resp = await callGemini(STRICT_FIDELITY_DIRECTIVE + "Extrae los datos y organízalos en una tabla Markdown con encabezados claros:\n\n" + target.text);
       if (resp) showInTaskpane(resp);
     };
 
-    // Botón: Copiar
+    // Copiar
     document.getElementById("btnCopy").onclick = () => {
       navigator.clipboard.writeText(currentRawResponse).then(() => {
         statusEl.innerText = "¡Copiado al portapapeles!";
@@ -457,7 +449,7 @@
       });
     };
 
-    // Botón: Insertar
+    // Insertar en la celda activa
     document.getElementById("btnInsert").onclick = () => {
       if (!currentRawResponse) return;
       Office.context.document.setSelectedDataAsync(currentRawResponse, { coercionType: Office.CoercionType.Text }, (res) => {
