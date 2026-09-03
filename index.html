@@ -3,67 +3,280 @@
 <head>
   <meta charset="UTF-8">
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+  <!-- Librería ligera para renderizar tablas y negritas con formato limpio en el panel -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <style>
-    body { font-family: Segoe UI, sans-serif; padding: 15px; margin: 0; }
-    input, textarea, button { width: 100%; box-sizing: border-box; margin-bottom: 10px; padding: 8px; }
-    button { background: #0078d4; color: white; border: none; border-radius: 4px; cursor: pointer; }
-    button:hover { background: #005a9e; }
-    textarea { height: 90px; resize: vertical; }
+    body {
+      font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, sans-serif;
+      padding: 14px;
+      margin: 0;
+      background-color: #f8f9fa;
+      color: #202124;
+      font-size: 13px;
+    }
+    h4 { margin: 0 0 10px 0; color: #1a73e8; }
+    input, textarea {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 8px;
+      margin-bottom: 8px;
+      border: 1px solid #dadce0;
+      border-radius: 6px;
+      font-family: inherit;
+      font-size: 12px;
+    }
+    textarea { height: 70px; resize: vertical; }
+    
+    .btn-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+      margin-bottom: 10px;
+    }
+    button {
+      padding: 8px 6px;
+      border: none;
+      border-radius: 5px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .btn-primary { background: #1a73e8; color: white; grid-column: span 2; }
+    .btn-primary:hover { background: #1557b0; }
+    .btn-action { background: #e8f0fe; color: #1967d2; border: 1px solid #d2e3fc; }
+    .btn-action:hover { background: #d2e3fc; }
+    button:disabled { background: #dadce0; color: #80868b; cursor: not-allowed; border: none; }
+
+    #status { font-size: 12px; margin-bottom: 8px; min-height: 16px; font-weight: 500; }
+    .status-wait { color: #e37400; }
+    .status-error { color: #d93025; }
+
+    /* Área de respuesta interna en el complemento */
+    #responseCard {
+      display: none;
+      background: #ffffff;
+      border: 1px solid #e0e0e0;
+      border-radius: 8px;
+      padding: 10px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+      margin-top: 5px;
+    }
+    #responseHeader {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+      padding-bottom: 5px;
+      border-bottom: 1px solid #eee;
+    }
+    #responseContent {
+      max-height: 280px;
+      overflow-y: auto;
+      line-height: 1.45;
+      font-size: 12.5px;
+    }
+    /* Estilo de tablas dentro del panel */
+    #responseContent table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 8px 0;
+      font-size: 11.5px;
+    }
+    #responseContent th, #responseContent td {
+      border: 1px solid #dadce0;
+      padding: 5px;
+      text-align: left;
+    }
+    #responseContent th { background-color: #f1f3f4; }
+
+    .btn-tiny {
+      padding: 3px 8px;
+      font-size: 11px;
+      border-radius: 4px;
+      background: #f1f3f4;
+      color: #3c4043;
+      border: 1px solid #dadce0;
+      margin-left: 4px;
+    }
+    .btn-tiny:hover { background: #e8eaed; }
   </style>
 </head>
 <body>
-  <h4>Asistente IA</h4>
-  <input type="password" id="apiKey" placeholder="Pega tu API Key de Gemini" />
-  <textarea id="prompt" placeholder="Escribe tu instrucción o pregunta..."></textarea>
-  <button id="btnAsk">Preguntar / Generar</button>
-  <button id="btnRewrite">Reescribir selección en Word</button>
-  <div id="status" style="font-size: 13px; color: #555;"></div>
+
+  <h4>Asistente Gemini</h4>
+  <input type="password" id="apiKey" placeholder="API Key de Gemini" />
+  <textarea id="prompt" placeholder="Escribe una consulta libre o selecciona texto en Word..."></textarea>
+
+  <button class="btn-primary" id="btnAsk">Preguntar / Chat Libre</button>
+
+  <p style="margin: 10px 0 5px 0; font-size: 11px; color: #5f6368; font-weight: bold; text-transform: uppercase;">
+    Acciones sobre el texto seleccionado:
+  </p>
+
+  <div class="btn-grid">
+    <button class="btn-action" id="btnRewrite">Reescribir</button>
+    <button class="btn-action" id="btnSummary">Resumen ejecutivo</button>
+    <button class="btn-action" id="btnVerify">Verificar coherencia</button>
+    <button class="btn-action" id="btnTable">Generar tabla</button>
+  </div>
+
+  <div id="status"></div>
+
+  <!-- Contenedor interno para mostrar la respuesta -->
+  <div id="responseCard">
+    <div id="responseHeader">
+      <span style="font-weight: 600; color: #3c4043;">Respuesta:</span>
+      <div>
+        <button class="btn-tiny" id="btnCopy" title="Copiar texto">Copiar</button>
+        <button class="btn-tiny" id="btnInsert" style="background:#e6f4ea; color:#137333; border-color:#ceead6;" title="Insertar en documento">Insertar en Word</button>
+      </div>
+    </div>
+    <div id="responseContent"></div>
+  </div>
 
   <script>
     Office.onReady();
 
-    const getStoredKey = () => {
-      const key = document.getElementById("apiKey").value.trim() || localStorage.getItem("gemini_key");
+    const apiKeyInput = document.getElementById("apiKey");
+    const statusEl = document.getElementById("status");
+    const responseCard = document.getElementById("responseCard");
+    const responseContent = document.getElementById("responseContent");
+    let currentRawResponse = "";
+
+    apiKeyInput.value = localStorage.getItem("gemini_key") || "";
+
+    function setUIBusy(isBusy, message = "") {
+      document.querySelectorAll("button").forEach(b => b.disabled = isBusy);
+      statusEl.className = isBusy ? "status-wait" : "";
+      statusEl.innerText = message;
+    }
+
+    function getApiKey() {
+      const key = apiKeyInput.value.trim() || localStorage.getItem("gemini_key");
       if (key) localStorage.setItem("gemini_key", key);
       return key;
-    };
-    document.getElementById("apiKey").value = localStorage.getItem("gemini_key") || "";
+    }
 
-    async function callGemini(text) {
-      const key = getStoredKey();
-      if (!key) return alert("Por favor ingresa tu API Key");
-      document.getElementById("status").innerText = "Procesando...";
+    // Llamada optimizada a la API (con thinking desactivado para máxima velocidad)
+    async function callGemini(instruction) {
+      const key = getApiKey();
+      if (!key) {
+        statusEl.className = "status-error";
+        statusEl.innerText = "Ingresa tu API Key arriba.";
+        return null;
+      }
+
+      setUIBusy(true, "Consultando a Gemini...");
+
       try {
         const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${key}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ contents: [{ parts: [{ text }] }] })
-          });
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: instruction }] }],
+            generationConfig: {
+              thinkingConfig: { thinkingBudget: 0 } // Desactiva el retraso de razonamiento
+            }
+          })
+        });
+
         const data = await res.json();
-        document.getElementById("status").innerText = "";
-        return data.candidates[0].content.parts[0].text;
+        setUIBusy(false);
+
+        if (data.error) {
+          statusEl.className = "status-error";
+          statusEl.innerText = "Error: " + data.error.message;
+          return null;
+        }
+
+        const parts = data.candidates[0].content.parts;
+        const textPart = parts.find(p => p.text && !p.thought) || parts[parts.length - 1];
+        return textPart.text;
+
       } catch (err) {
-        document.getElementById("status").innerText = "Error al consultar la API";
+        setUIBusy(false);
+        statusEl.className = "status-error";
+        statusEl.innerText = "Error de red: " + err.message;
+        return null;
       }
     }
 
+    // Muestra el resultado dentro del panel sin tocar el documento
+    function showInTaskpane(text) {
+      currentRawResponse = text;
+      responseContent.innerHTML = marked.parse(text);
+      responseCard.style.display = "block";
+      statusEl.innerText = "";
+    }
+
+    // Obtener texto seleccionado en Word
+    function withSelectedText(callback) {
+      Office.context.document.getSelectedDataAsync(Office.CoercionType.Text, async (result) => {
+        if (result.status === Office.AsyncResultStatus.Succeeded && result.value && result.value.trim()) {
+          callback(result.value);
+        } else {
+          statusEl.className = "status-error";
+          statusEl.innerText = "Selecciona texto dentro del documento primero.";
+        }
+      });
+    }
+
+    // Botón: Pregunta libre
     document.getElementById("btnAsk").onclick = async () => {
-      const prompt = document.getElementById("prompt").value;
-      const resp = await callGemini(prompt);
-      if (resp) {
-        Office.context.document.setSelectedDataAsync(resp, { coercionType: Office.CoercionType.Text });
-      }
+      const promptText = document.getElementById("prompt").value.trim();
+      if (!promptText) return;
+      const resp = await callGemini(promptText);
+      if (resp) showInTaskpane(resp);
     };
 
+    // Botón: Reescribir
     document.getElementById("btnRewrite").onclick = () => {
-      Office.context.document.getSelectedDataAsync(Office.CoercionType.Text, async (result) => {
-        if (result.status === Office.AsyncResultStatus.Succeeded && result.value) {
-          const resp = await callGemini("Mejora la redacción, claridad y estilo del siguiente texto manteniendo el sentido:\n" + result.value);
-          if (resp) {
-            Office.context.document.setSelectedDataAsync(resp, { coercionType: Office.CoercionType.Text });
-          }
-        } else {
-          alert("Selecciona texto en el documento primero.");
+      withSelectedText(async (text) => {
+        const resp = await callGemini("Mejora la redacción, claridad, estilo profesional y ortografía del siguiente texto manteniendo su intención original:\n\n" + text);
+        if (resp) showInTaskpane(resp);
+      });
+    };
+
+    // Botón: Resumen ejecutivo
+    document.getElementById("btnSummary").onclick = () => {
+      withSelectedText(async (text) => {
+        const resp = await callGemini("Genera un resumen ejecutivo estructurado, conciso y formal del siguiente texto. Destaca los puntos esenciales, objetivos o conclusiones clave:\n\n" + text);
+        if (resp) showInTaskpane(resp);
+      });
+    };
+
+    // Botón: Verificación de información y coherencia
+    document.getElementById("btnVerify").onclick = () => {
+      withSelectedText(async (text) => {
+        const resp = await callGemini("Actúa como un revisor crítico, objetivo e imparcial. Analiza el siguiente texto y evalúa: 1) Coherencia lógica y vacíos argumentales, 2) Posibles inconsistencias o datos dudosos, y 3) Recomendaciones puntuales para darle mayor solidez:\n\n" + text);
+        if (resp) showInTaskpane(resp);
+      });
+    };
+
+    // Botón: Generar tabla
+    document.getElementById("btnTable").onclick = () => {
+      withSelectedText(async (text) => {
+        const resp = await callGemini("Extrae y sintetiza la información relevante del siguiente texto y organízala en una tabla en formato Markdown con columnas y encabezados claros y comparables:\n\n" + text);
+        if (resp) showInTaskpane(resp);
+      });
+    };
+
+    // Copiar al portapapeles
+    document.getElementById("btnCopy").onclick = () => {
+      navigator.clipboard.writeText(currentRawResponse).then(() => {
+        statusEl.innerText = "¡Copiado al portapapeles!";
+        setTimeout(() => statusEl.innerText = "", 2500);
+      });
+    };
+
+    // Insertar en la posición del cursor en Word si decides usarlo
+    document.getElementById("btnInsert").onclick = () => {
+      if (!currentRawResponse) return;
+      Office.context.document.setSelectedDataAsync(currentRawResponse, { coercionType: Office.CoercionType.Text }, (res) => {
+        if (res.status === Office.AsyncResultStatus.Succeeded) {
+          statusEl.innerText = "Insertado en el documento.";
+          setTimeout(() => statusEl.innerText = "", 2500);
         }
       });
     };
