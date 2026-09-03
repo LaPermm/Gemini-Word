@@ -15,7 +15,7 @@
       font-size: 13px;
     }
     h4 { margin: 0 0 10px 0; color: #1a73e8; }
-    input, textarea {
+    input[type="password"], textarea {
       width: 100%;
       box-sizing: border-box;
       padding: 8px;
@@ -26,6 +26,22 @@
       font-size: 12px;
     }
     textarea { height: 65px; resize: vertical; }
+
+    .context-toggle {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 10px;
+      font-size: 12px;
+      font-weight: 500;
+      color: #3c4043;
+      cursor: pointer;
+      background: #eef2fa;
+      padding: 6px 8px;
+      border-radius: 5px;
+      border: 1px solid #d2e3fc;
+    }
+    .context-toggle input { cursor: pointer; margin: 0; }
     
     .btn-grid {
       display: grid;
@@ -105,12 +121,17 @@
 
   <h4>Asistente Gemini</h4>
   <input type="password" id="apiKey" placeholder="API Key de Gemini" />
-  <textarea id="prompt" placeholder="Escribe una instrucción o selecciona texto en Word..."></textarea>
+  <textarea id="prompt" placeholder="Haz una pregunta o da una instrucción..."></textarea>
 
-  <button class="btn-primary" id="btnAsk">Preguntar / Chat Libre</button>
+  <label class="context-toggle">
+    <input type="checkbox" id="chkFullDoc">
+    <span>Leer todo el archivo como contexto</span>
+  </label>
+
+  <button class="btn-primary" id="btnAsk">Preguntar / Analizar</button>
 
   <p style="margin: 8px 0 4px 0; font-size: 11px; color: #5f6368; font-weight: bold; text-transform: uppercase;">
-    Acciones sobre texto seleccionado:
+    Acciones automáticas:
   </p>
 
   <div class="btn-grid">
@@ -128,7 +149,7 @@
       <span style="font-weight: 600; color: #3c4043;">Respuesta:</span>
       <div>
         <button class="btn-tiny" id="btnCopy">Copiar</button>
-        <button class="btn-tiny" id="btnInsert" style="background:#e6f4ea; color:#137333; border-color:#ceead6;">Insertar en Word</button>
+        <button class="btn-tiny" id="btnInsert" style="background:#e6f4ea; color:#137333; border-color:#ceead6;">Insertar</button>
       </div>
     </div>
     <div id="responseContent"></div>
@@ -138,6 +159,7 @@
     Office.onReady();
 
     const apiKeyInput = document.getElementById("apiKey");
+    const chkFullDoc = document.getElementById("chkFullDoc");
     const statusEl = document.getElementById("status");
     const responseCard = document.getElementById("responseCard");
     const responseContent = document.getElementById("responseContent");
@@ -155,6 +177,44 @@
       const key = apiKeyInput.value.trim() || localStorage.getItem("gemini_key");
       if (key) localStorage.setItem("gemini_key", key);
       return key;
+    }
+
+    // Extrae todo el contenido del archivo según si estamos en Word o Excel
+    async function getDocumentContext() {
+      try {
+        if (Office.context.host === Office.HostType.Word) {
+          return await Word.run(async (context) => {
+            const body = context.document.body;
+            body.load("text");
+            await context.sync();
+            return body.text.trim();
+          });
+        } else if (Office.context.host === Office.HostType.Excel) {
+          return await Excel.run(async (context) => {
+            const sheet = context.workbook.getActiveSheet();
+            const range = sheet.getUsedRange();
+            range.load("values");
+            await context.sync();
+            return range.values.map(row => row.join(" | ")).join("\n");
+          });
+        }
+      } catch (err) {
+        console.warn("No se pudo leer el archivo completo:", err);
+      }
+      return "";
+    }
+
+    // Obtener texto seleccionado (fallback)
+    function getSelectedTextAsync() {
+      return new Promise((resolve) => {
+        Office.context.document.getSelectedDataAsync(Office.CoercionType.Text, (result) => {
+          if (result.status === Office.AsyncResultStatus.Succeeded && result.value && result.value.trim()) {
+            resolve(result.value.trim());
+          } else {
+            resolve("");
+          }
+        });
+      });
     }
 
     async function callGemini(instruction) {
@@ -204,55 +264,93 @@
       statusEl.innerText = "";
     }
 
-    function withSelectedText(callback) {
-      Office.context.document.getSelectedDataAsync(Office.CoercionType.Text, async (result) => {
-        if (result.status === Office.AsyncResultStatus.Succeeded && result.value && result.value.trim()) {
-          callback(result.value);
-        } else {
-          statusEl.className = "status-error";
-          statusEl.innerText = "Selecciona texto dentro del documento primero.";
-        }
-      });
+    // Determina si se procesa la selección o todo el documento
+    async function resolveTargetText() {
+      const selection = await getSelectedTextAsync();
+      if (selection) return { text: selection, isFullDoc: false };
+
+      if (chkFullDoc.checked) {
+        setUIBusy(true, "Extrayendo archivo completo...");
+        const full = await getDocumentContext();
+        setUIBusy(false);
+        if (full) return { text: full, isFullDoc: true };
+      }
+      return null;
     }
 
-    // Botón: Chat / Pregunta libre
+    // Botón: Preguntar / Chat
     document.getElementById("btnAsk").onclick = async () => {
       const promptText = document.getElementById("prompt").value.trim();
       if (!promptText) return;
-      const resp = await callGemini(promptText);
+
+      let instruction = promptText;
+
+      if (chkFullDoc.checked) {
+        setUIBusy(true, "Leyendo archivo completo...");
+        const contextData = await getDocumentContext();
+        setUIBusy(false);
+
+        if (!contextData) {
+          statusEl.className = "status-error";
+          statusEl.innerText = "El documento parece estar vacío.";
+          return;
+        }
+
+        instruction = `Actúa como un analista experto. Responde la siguiente pregunta basándote estrictamente en el contenido del archivo adjunto a continuación. Si la respuesta no está presente en el texto, acláralo expresamente.\n\n` +
+          `--- INICIO DEL ARCHIVO ---\n${contextData}\n--- FIN DEL ARCHIVO ---\n\n` +
+          `Pregunta del usuario: ${promptText}`;
+      }
+
+      const resp = await callGemini(instruction);
       if (resp) showInTaskpane(resp);
     };
 
     // Botón: Reescribir
-    document.getElementById("btnRewrite").onclick = () => {
-      withSelectedText(async (text) => {
-        const resp = await callGemini("Mejora la redacción, claridad y corrección ortográfica del siguiente texto manteniendo su sentido original:\n\n" + text);
-        if (resp) showInTaskpane(resp);
-      });
+    document.getElementById("btnRewrite").onclick = async () => {
+      const target = await resolveTargetText();
+      if (!target) {
+        statusEl.className = "status-error";
+        statusEl.innerText = "Selecciona texto o activa la casilla de leer todo el archivo.";
+        return;
+      }
+      const resp = await callGemini("Mejora la redacción, estilo profesional, claridad y ortografía del siguiente texto manteniendo el sentido original:\n\n" + target.text);
+      if (resp) showInTaskpane(resp);
     };
 
     // Botón: Resumen ejecutivo
-    document.getElementById("btnSummary").onclick = () => {
-      withSelectedText(async (text) => {
-        const resp = await callGemini("Genera un resumen ejecutivo estructurado, conciso y formal del siguiente texto, destacando puntos esenciales y conclusiones:\n\n" + text);
-        if (resp) showInTaskpane(resp);
-      });
+    document.getElementById("btnSummary").onclick = async () => {
+      const target = await resolveTargetText();
+      if (!target) {
+        statusEl.className = "status-error";
+        statusEl.innerText = "Selecciona texto o activa la casilla de leer todo el archivo.";
+        return;
+      }
+      const resp = await callGemini("Genera un resumen ejecutivo formal, estructurado con puntos clave y conclusiones principales del siguiente contenido:\n\n" + target.text);
+      if (resp) showInTaskpane(resp);
     };
 
-    // Botón: Verificación de información y coherencia
-    document.getElementById("btnVerify").onclick = () => {
-      withSelectedText(async (text) => {
-        const resp = await callGemini("Actúa como revisor crítico y objetivo. Evalúa el siguiente texto identificando: 1) Coherencia lógica y vacíos argumentales, 2) Inconsistencias o datos dudosos, y 3) Recomendaciones puntuales para darle mayor solidez:\n\n" + text);
-        if (resp) showInTaskpane(resp);
-      });
+    // Botón: Verificar coherencia
+    document.getElementById("btnVerify").onclick = async () => {
+      const target = await resolveTargetText();
+      if (!target) {
+        statusEl.className = "status-error";
+        statusEl.innerText = "Selecciona texto o activa la casilla de leer todo el archivo.";
+        return;
+      }
+      const resp = await callGemini("Actúa como revisor crítico e imparcial. Analiza el siguiente contenido y detalla: 1) Coherencia lógica y vacíos argumentales, 2) Inconsistencias o datos dudosos, y 3) Recomendaciones puntuales para reforzarlo:\n\n" + target.text);
+      if (resp) showInTaskpane(resp);
     };
 
     // Botón: Generar tabla
-    document.getElementById("btnTable").onclick = () => {
-      withSelectedText(async (text) => {
-        const resp = await callGemini("Extrae los datos relevantes del siguiente texto y organízalos en una tabla Markdown con columnas claras y comparables:\n\n" + text);
-        if (resp) showInTaskpane(resp);
-      });
+    document.getElementById("btnTable").onclick = async () => {
+      const target = await resolveTargetText();
+      if (!target) {
+        statusEl.className = "status-error";
+        statusEl.innerText = "Selecciona texto o activa la casilla de leer todo el archivo.";
+        return;
+      }
+      const resp = await callGemini("Extrae los datos estructurados o comparativos del siguiente contenido y organízalos en una tabla Markdown con encabezados claros:\n\n" + target.text);
+      if (resp) showInTaskpane(resp);
     };
 
     // Botón: Copiar
@@ -263,13 +361,16 @@
       });
     };
 
-    // Botón: Insertar en Word
+    // Botón: Insertar en Word o Excel
     document.getElementById("btnInsert").onclick = () => {
       if (!currentRawResponse) return;
       Office.context.document.setSelectedDataAsync(currentRawResponse, { coercionType: Office.CoercionType.Text }, (res) => {
         if (res.status === Office.AsyncResultStatus.Succeeded) {
-          statusEl.innerText = "Insertado en el documento.";
+          statusEl.innerText = "Insertado exitosamente.";
           setTimeout(() => statusEl.innerText = "", 2500);
+        } else {
+          statusEl.className = "status-error";
+          statusEl.innerText = "Error al insertar: " + res.error.message;
         }
       });
     };
