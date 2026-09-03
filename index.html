@@ -3,7 +3,6 @@
 <head>
   <meta charset="UTF-8">
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
-  <!-- Librería para renderizar tablas y texto enriquecido en el panel -->
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <style>
     body {
@@ -68,7 +67,6 @@
     .status-wait { color: #e37400; font-weight: 500; }
     .status-error { color: #d93025; font-weight: 600; }
 
-    /* Panel de respuesta */
     #responseCard {
       display: none;
       background: #ffffff;
@@ -143,7 +141,6 @@
 
   <div id="status"></div>
 
-  <!-- Panel de respuesta -->
   <div id="responseCard">
     <div id="responseHeader">
       <span style="font-weight: 600; color: #3c4043;">Respuesta:</span>
@@ -156,11 +153,7 @@
   </div>
 
   <script>
-    let currentAppHost = "";
-
-    Office.onReady((info) => {
-      currentAppHost = info.host;
-    });
+    Office.onReady();
 
     const apiKeyInput = document.getElementById("apiKey");
     const chkFullDoc = document.getElementById("chkFullDoc");
@@ -185,91 +178,105 @@
       return key;
     }
 
-    // Extracción limpia sin propiedades inválidas
-    async function getDocumentContext() {
-      try {
-        // 1. EXCEL
-        if (typeof Excel !== "undefined" && typeof Excel.run === "function") {
-          return await Excel.run(async (context) => {
-            const sheet = context.workbook.getActiveSheet();
-            const range = sheet.getUsedRange();
-            range.load("text");
-            await context.sync();
-
-            if (!range.text || range.text.length === 0) return "";
-
-            // Filtra filas que tengan al menos una celda con datos
-            const rows = range.text
-              .filter(row => row.some(cell => cell !== null && cell !== undefined && String(cell).trim() !== ""))
-              .map(row => row.map(cell => (cell ? String(cell).trim() : "")).join(" | "));
-
-            return rows.join("\n");
-          });
-        }
-
-        // 2. WORD
-        if (typeof Word !== "undefined" && typeof Word.run === "function") {
-          return await Word.run(async (context) => {
-            const body = context.document.body;
-            body.load("text");
-            await context.sync();
-            return body.text ? body.text.trim() : "";
-          });
-        }
-
-        // 3. POWERPOINT
-        if (typeof PowerPoint !== "undefined" && typeof PowerPoint.run === "function") {
-          return await PowerPoint.run(async (context) => {
-            const slides = context.presentation.slides;
-            slides.load("items");
-            await context.sync();
-
-            let fullPresentation = [];
-            for (let i = 0; i < slides.items.length; i++) {
-              const slide = slides.items[i];
-              const shapes = slide.shapes;
-              shapes.load("items");
-              await context.sync();
-
-              for (let j = 0; j < shapes.items.length; j++) {
-                shapes.items[j].load("textFrame");
-              }
-              await context.sync();
-
-              for (let j = 0; j < shapes.items.length; j++) {
-                if (shapes.items[j].textFrame) shapes.items[j].textFrame.load("hasText");
-              }
-              await context.sync();
-
-              for (let j = 0; j < shapes.items.length; j++) {
-                const tf = shapes.items[j].textFrame;
-                if (tf && tf.hasText) tf.textRange.load("text");
-              }
-              await context.sync();
-
-              let slideTexts = [];
-              for (let j = 0; j < shapes.items.length; j++) {
-                const tf = shapes.items[j].textFrame;
-                if (tf && tf.hasText && tf.textRange && tf.textRange.text.trim()) {
-                  slideTexts.push(tf.textRange.text.trim());
-                }
-              }
-
-              if (slideTexts.length > 0) {
-                fullPresentation.push(`[Diapositiva ${i + 1}]\n` + slideTexts.join("\n"));
-              }
-            }
-            return fullPresentation.join("\n\n");
-          });
-        }
-      } catch (err) {
-        // En Excel, si la hoja está totalmente vacía getUsedRange arroja ItemNotFound
-        if (err.code === "ItemNotFound") return "";
-        statusEl.className = "status-error";
-        statusEl.innerText = "Error al leer documento: " + err.message;
-        return "";
+    // Extracción de Excel con respaldo a rango seleccionado
+    async function getExcelData() {
+      if (typeof Excel === "undefined" || !Excel.run) {
+        throw new Error("El motor de Excel no está listo o no es compatible.");
       }
-      return "";
+
+      return await Excel.run(async (context) => {
+        const sheet = context.workbook.getActiveSheet();
+        let range = sheet.getUsedRange();
+        range.load(["values", "rowCount", "columnCount"]);
+
+        try {
+          await context.sync();
+        } catch (syncErr) {
+          // Si getUsedRange falla por hoja recién creada, respaldar en la selección actual
+          const sel = context.workbook.getSelectedRange();
+          sel.load(["values", "rowCount", "columnCount"]);
+          await context.sync();
+          range = sel;
+        }
+
+        if (!range.values || range.values.length === 0) return "";
+
+        const lines = [];
+        for (let r = 0; r < range.values.length; r++) {
+          const row = range.values[r];
+          const hasData = row.some(cell => cell !== null && cell !== undefined && String(cell).trim() !== "");
+          if (hasData) {
+            const formattedRow = row.map(cell => (cell === null || cell === undefined ? "" : String(cell).trim())).join(" | ");
+            lines.push(formattedRow);
+          }
+        }
+        return lines.join("\n");
+      });
+    }
+
+    async function getWordData() {
+      return await Word.run(async (context) => {
+        const body = context.document.body;
+        body.load("text");
+        await context.sync();
+        return body.text ? body.text.trim() : "";
+      });
+    }
+
+    async function getPowerPointData() {
+      return await PowerPoint.run(async (context) => {
+        const slides = context.presentation.slides;
+        slides.load("items");
+        await context.sync();
+
+        let fullPresentation = [];
+        for (let i = 0; i < slides.items.length; i++) {
+          const slide = slides.items[i];
+          const shapes = slide.shapes;
+          shapes.load("items");
+          await context.sync();
+
+          for (let j = 0; j < shapes.items.length; j++) shapes.items[j].load("textFrame");
+          await context.sync();
+
+          for (let j = 0; j < shapes.items.length; j++) {
+            if (shapes.items[j].textFrame) shapes.items[j].textFrame.load("hasText");
+          }
+          await context.sync();
+
+          for (let j = 0; j < shapes.items.length; j++) {
+            const tf = shapes.items[j].textFrame;
+            if (tf && tf.hasText) tf.textRange.load("text");
+          }
+          await context.sync();
+
+          let slideTexts = [];
+          for (let j = 0; j < shapes.items.length; j++) {
+            const tf = shapes.items[j].textFrame;
+            if (tf && tf.hasText && tf.textRange && tf.textRange.text.trim()) {
+              slideTexts.push(tf.textRange.text.trim());
+            }
+          }
+          if (slideTexts.length > 0) {
+            fullPresentation.push(`[Diapositiva ${i + 1}]\n` + slideTexts.join("\n"));
+          }
+        }
+        return fullPresentation.join("\n\n");
+      });
+    }
+
+    async function getDocumentContext() {
+      const host = Office.context.host;
+      if (host === Office.HostType.Excel || host === "Excel") return await getExcelData();
+      if (host === Office.HostType.Word || host === "Word") return await getWordData();
+      if (host === Office.HostType.PowerPoint || host === "PowerPoint") return await getPowerPointData();
+
+      // Detección por objeto global en caso de hosts no tipados
+      if (typeof Excel !== "undefined" && Excel.run) return await getExcelData();
+      if (typeof Word !== "undefined" && Word.run) return await getWordData();
+      if (typeof PowerPoint !== "undefined" && PowerPoint.run) return await getPowerPointData();
+
+      throw new Error("No se pudo detectar el host de Office actual.");
     }
 
     function getSelectedTextAsync() {
@@ -308,7 +315,7 @@
 
         if (data.error) {
           statusEl.className = "status-error";
-          statusEl.innerText = "Error: " + data.error.message;
+          statusEl.innerText = "Error API: " + data.error.message;
           return null;
         }
 
@@ -337,31 +344,52 @@
 
       if (chkFullDoc.checked) {
         setUIBusy(true, "Extrayendo archivo completo...");
-        const full = await getDocumentContext();
-        setUIBusy(false);
-        if (full) return { text: full, isFullDoc: true };
+        try {
+          const full = await getDocumentContext();
+          setUIBusy(false);
+          if (full && full.trim()) return { text: full, isFullDoc: true };
+        } catch (err) {
+          setUIBusy(false);
+          statusEl.className = "status-error";
+          statusEl.innerText = "Error: " + err.message;
+          return null;
+        }
       }
       return null;
     }
 
     const STRICT_FIDELITY_DIRECTIVE = 
       "DIRECTIVA DE FIDELIDAD ESTRICTA:\n" +
-      "- Responde ÚNICA Y EXCLUSIVAMENTE basándote en la información explícitamente redactada en el documento proporcionado.\n" +
-      "- Prohibido inferir, suponer o incorporar conocimientos externos que no figuren en el texto o celdas.\n" +
-      "- Si la respuesta a una pregunta o dato no se encuentra en el documento, indica expresamente: \"Esa información no aparece en el documento\".\n\n";
+      "- Responde ÚNICA Y EXCLUSIVAMENTE basándote en la información explícitamente contenida en los datos proporcionados.\n" +
+      "- Prohibido inferir o inventar información que no figure en las celdas o texto.\n" +
+      "- Si la respuesta no se encuentra en el archivo, responde: \"Esa información no aparece en el documento\".\n\n";
 
-    // Preguntar / Analizar
+    // Botón: Preguntar / Analizar
     document.getElementById("btnAsk").onclick = async () => {
       const promptText = document.getElementById("prompt").value.trim();
 
       if (chkFullDoc.checked) {
-        setUIBusy(true, "Leyendo archivo completo...");
-        const contextData = await getDocumentContext();
+        setUIBusy(true, "Leyendo archivo...");
+        let contextData = "";
 
-        if (!contextData) {
+        try {
+          contextData = await getDocumentContext();
+        } catch (readErr) {
           setUIBusy(false);
           statusEl.className = "status-error";
-          statusEl.innerText = "El archivo actual parece estar vacío o sin celdas activas.";
+          if (readErr.message && (readErr.message.includes("edit mode") || readErr.code === "InvalidOperationInCellEditMode")) {
+            statusEl.innerText = "Excel está editando una celda. Presiona ENTER o haz clic fuera de ella y reintenta.";
+          } else {
+            statusEl.innerText = "Error al leer Excel: " + (readErr.message || readErr);
+          }
+          return;
+        }
+
+        setUIBusy(false);
+
+        if (!contextData || !contextData.trim()) {
+          statusEl.className = "status-error";
+          statusEl.innerText = "No se detectaron datos en la hoja activa. Escribe datos o selecciona un rango de celdas.";
           return;
         }
 
@@ -369,16 +397,16 @@
 
         if (!promptText) {
           instruction = STRICT_FIDELITY_DIRECTIVE +
-            "Has recibido el siguiente contenido del archivo como contexto documental exclusivo:\n\n" +
-            "--- INICIO DEL ARCHIVO ---\n" + contextData + "\n--- FIN DEL ARCHIVO ---\n\n" +
+            "Has recibido los siguientes datos de la hoja como contexto exclusivo:\n\n" +
+            "--- INICIO DE DATOS ---\n" + contextData + "\n--- FIN DE DATOS ---\n\n" +
             "INSTRUCCIÓN:\n" +
-            "1. Confirma brevemente que el archivo ha sido procesado exitosamente.\n" +
-            "2. Presenta un resumen conciso en 3 o 4 viñetas clave indicando los datos, columnas o temas principales detectados.\n" +
-            "3. Indica que quedas listo para responder preguntas específicas sobre este archivo bajo la directiva de fidelidad estricta.";
+            "1. Confirma brevemente que los datos han sido procesados.\n" +
+            "2. Presenta un resumen conciso en 3 o 4 viñetas sobre las columnas, datos o patrones encontrados.\n" +
+            "3. Indica que quedas listo para responder preguntas sobre estos datos.";
         } else {
           instruction = STRICT_FIDELITY_DIRECTIVE +
-            "Contenido del archivo de referencia:\n\n" +
-            "--- INICIO DEL ARCHIVO ---\n" + contextData + "\n--- FIN DEL ARCHIVO ---\n\n" +
+            "Datos de la hoja de cálculo de referencia:\n\n" +
+            "--- INICIO DE DATOS ---\n" + contextData + "\n--- FIN DE DATOS ---\n\n" +
             "Pregunta del usuario: " + promptText;
         }
 
@@ -388,7 +416,7 @@
       } else {
         if (!promptText) {
           statusEl.className = "status-error";
-          statusEl.innerText = "Escribe una pregunta o activa la casilla de leer todo el archivo.";
+          statusEl.innerText = "Escribe una pregunta o activa la casilla de leer archivo.";
           return;
         }
         const resp = await callGemini(promptText);
@@ -401,10 +429,10 @@
       const target = await resolveTargetText();
       if (!target) {
         statusEl.className = "status-error";
-        statusEl.innerText = "Selecciona celdas o activa la casilla de leer todo el archivo.";
+        statusEl.innerText = "Selecciona celdas o activa la casilla de leer archivo.";
         return;
       }
-      const resp = await callGemini("Mejora la redacción, estilo profesional, claridad y ortografía del siguiente contenido manteniendo el sentido original:\n\n" + target.text);
+      const resp = await callGemini("Mejora la redacción, claridad y formato del siguiente contenido manteniendo los datos intactos:\n\n" + target.text);
       if (resp) showInTaskpane(resp);
     };
 
@@ -412,7 +440,7 @@
       const target = await resolveTargetText();
       if (!target) {
         statusEl.className = "status-error";
-        statusEl.innerText = "Selecciona celdas o activa la casilla de leer todo el archivo.";
+        statusEl.innerText = "Selecciona celdas o activa la casilla de leer archivo.";
         return;
       }
       const resp = await callGemini(STRICT_FIDELITY_DIRECTIVE + "Genera un resumen ejecutivo formal y estructurado en viñetas basándote exclusivamente en estos datos:\n\n" + target.text);
@@ -423,10 +451,10 @@
       const target = await resolveTargetText();
       if (!target) {
         statusEl.className = "status-error";
-        statusEl.innerText = "Selecciona celdas o activa la casilla de leer todo el archivo.";
+        statusEl.innerText = "Selecciona celdas o activa la casilla de leer archivo.";
         return;
       }
-      const resp = await callGemini(STRICT_FIDELITY_DIRECTIVE + "Actúa como revisor crítico e imparcial. Analiza la coherencia de estos datos y detalla: 1) Coherencia lógica, 2) Inconsistencias o anomalías numéricas/conceptuales, y 3) Recomendaciones puntuales:\n\n" + target.text);
+      const resp = await callGemini(STRICT_FIDELITY_DIRECTIVE + "Actúa como revisor de datos. Analiza la coherencia de esta información e identifica anomalías numéricas, vacíos o inconsistencias:\n\n" + target.text);
       if (resp) showInTaskpane(resp);
     };
 
@@ -434,10 +462,10 @@
       const target = await resolveTargetText();
       if (!target) {
         statusEl.className = "status-error";
-        statusEl.innerText = "Selecciona celdas o activa la casilla de leer todo el archivo.";
+        statusEl.innerText = "Selecciona celdas o activa la casilla de leer archivo.";
         return;
       }
-      const resp = await callGemini(STRICT_FIDELITY_DIRECTIVE + "Extrae los datos y organízalos en una tabla Markdown con encabezados claros:\n\n" + target.text);
+      const resp = await callGemini(STRICT_FIDELITY_DIRECTIVE + "Extrae y organiza los datos en una tabla Markdown clara y estructurada:\n\n" + target.text);
       if (resp) showInTaskpane(resp);
     };
 
@@ -449,7 +477,7 @@
       });
     };
 
-    // Insertar en la celda activa
+    // Insertar
     document.getElementById("btnInsert").onclick = () => {
       if (!currentRawResponse) return;
       Office.context.document.setSelectedDataAsync(currentRawResponse, { coercionType: Office.CoercionType.Text }, (res) => {
