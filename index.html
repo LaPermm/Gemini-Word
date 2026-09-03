@@ -178,11 +178,39 @@
       return key;
     }
 
-    // Extracción de Excel con respaldo a rango seleccionado
+   // Extracción de datos en Excel corregida
     async function getExcelData() {
       if (typeof Excel === "undefined" || !Excel.run) {
-        throw new Error("El motor de Excel no está listo o no es compatible.");
+        throw new Error("El motor de Excel no está disponible.");
       }
+
+      return await Excel.run(async (context) => {
+        // En Excel.js se accede a través de .worksheets
+        const sheet = context.workbook.worksheets.getActiveWorksheet();
+        const range = sheet.getUsedRange();
+        range.load("text");
+
+        try {
+          await context.sync();
+        } catch (syncErr) {
+          // Si la hoja está totalmente vacía, getUsedRange lanza ItemNotFound
+          return "";
+        }
+
+        if (!range.text || range.text.length === 0) return "";
+
+        const lines = [];
+        for (let r = 0; r < range.text.length; r++) {
+          const row = range.text[r];
+          const hasData = row.some(cell => cell !== null && cell !== undefined && String(cell).trim() !== "");
+          if (hasData) {
+            const formattedRow = row.map(cell => (cell ? String(cell).trim() : "")).join(" | ");
+            lines.push(formattedRow);
+          }
+        }
+        return lines.join("\n");
+      });
+    }
 
       return await Excel.run(async (context) => {
         const sheet = context.workbook.getActiveSheet();
