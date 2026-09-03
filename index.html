@@ -179,9 +179,9 @@
       return key;
     }
 
-    // Extrae todo el contenido del archivo según si estamos en Word o Excel
-    async function getDocumentContext() {
+   async function getDocumentContext() {
       try {
+        // 1. Caso Microsoft Word
         if (Office.context.host === Office.HostType.Word) {
           return await Word.run(async (context) => {
             const body = context.document.body;
@@ -189,7 +189,9 @@
             await context.sync();
             return body.text.trim();
           });
-        } else if (Office.context.host === Office.HostType.Excel) {
+        } 
+        // 2. Caso Microsoft Excel
+        else if (Office.context.host === Office.HostType.Excel) {
           return await Excel.run(async (context) => {
             const sheet = context.workbook.getActiveSheet();
             const range = sheet.getUsedRange();
@@ -197,9 +199,61 @@
             await context.sync();
             return range.values.map(row => row.join(" | ")).join("\n");
           });
+        } 
+        // 3. Caso Microsoft PowerPoint
+        else if (Office.context.host === Office.HostType.PowerPoint) {
+          return await PowerPoint.run(async (context) => {
+            const slides = context.presentation.slides;
+            slides.load("items");
+            await context.sync();
+
+            let fullPresentation = [];
+
+            for (let i = 0; i < slides.items.length; i++) {
+              const slide = slides.items[i];
+              const shapes = slide.shapes;
+              shapes.load("items");
+              await context.sync();
+
+              // Cargar cuadros de texto de cada forma en la diapositiva
+              for (let j = 0; j < shapes.items.length; j++) {
+                shapes.items[j].load("textFrame");
+              }
+              await context.sync();
+
+              for (let j = 0; j < shapes.items.length; j++) {
+                if (shapes.items[j].textFrame) {
+                  shapes.items[j].textFrame.load("hasText");
+                }
+              }
+              await context.sync();
+
+              for (let j = 0; j < shapes.items.length; j++) {
+                const tf = shapes.items[j].textFrame;
+                if (tf && tf.hasText) {
+                  tf.textRange.load("text");
+                }
+              }
+              await context.sync();
+
+              let slideTexts = [];
+              for (let j = 0; j < shapes.items.length; j++) {
+                const tf = shapes.items[j].textFrame;
+                if (tf && tf.hasText && tf.textRange && tf.textRange.text.trim()) {
+                  slideTexts.push(tf.textRange.text.trim());
+                }
+              }
+
+              if (slideTexts.length > 0) {
+                fullPresentation.push(`[Diapositiva ${i + 1}]\n` + slideTexts.join("\n"));
+              }
+            }
+
+            return fullPresentation.join("\n\n");
+          });
         }
       } catch (err) {
-        console.warn("No se pudo leer el archivo completo:", err);
+        console.warn("No se pudo leer el contexto completo del archivo:", err);
       }
       return "";
     }
