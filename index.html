@@ -4,6 +4,19 @@
   <meta charset="UTF-8">
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  
+  <!-- Detector global para evitar que la interfaz se quede muda si ocurre un error -->
+  <script>
+    window.onerror = function(msg, url, line) {
+      var el = document.getElementById("status");
+      if (el) {
+        el.className = "status-error";
+        el.innerText = "Error en script (Línea " + line + "): " + msg;
+      }
+      return false;
+    };
+  </script>
+
   <style>
     body {
       font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, sans-serif;
@@ -164,9 +177,9 @@
 
     apiKeyInput.value = localStorage.getItem("gemini_key") || "";
 
-    function setUIBusy(isBusy, message = "") {
-      document.querySelectorAll("button").forEach(b => b.disabled = isBusy);
-      if (message) {
+    function setUIBusy(isBusy, message) {
+      document.querySelectorAll("button").forEach(function(b) { b.disabled = isBusy; });
+      if (message !== undefined) {
         statusEl.className = isBusy ? "status-wait" : "";
         statusEl.innerText = message;
       }
@@ -178,53 +191,29 @@
       return key;
     }
 
-   // Extracción de datos en Excel corregida
+    // Extracción en Excel
     async function getExcelData() {
       if (typeof Excel === "undefined" || !Excel.run) {
         throw new Error("El motor de Excel no está disponible.");
       }
 
-      return await Excel.run(async (context) => {
-        // En Excel.js se accede a través de .worksheets
+      return await Excel.run(async function(context) {
         const sheet = context.workbook.worksheets.getActiveWorksheet();
-        const range = sheet.getUsedRange();
-        range.load("text");
+        let range = sheet.getUsedRange(true);
+        range.load("values");
 
         try {
           await context.sync();
         } catch (syncErr) {
-          // Si la hoja está totalmente vacía, getUsedRange lanza ItemNotFound
-          return "";
-        }
-
-        if (!range.text || range.text.length === 0) return "";
-
-        const lines = [];
-        for (let r = 0; r < range.text.length; r++) {
-          const row = range.text[r];
-          const hasData = row.some(cell => cell !== null && cell !== undefined && String(cell).trim() !== "");
-          if (hasData) {
-            const formattedRow = row.map(cell => (cell ? String(cell).trim() : "")).join(" | ");
-            lines.push(formattedRow);
+          // Si getUsedRange no encuentra celdas con valores, intenta con la selección
+          try {
+            const sel = context.workbook.getSelectedRange();
+            sel.load("values");
+            await context.sync();
+            range = sel;
+          } catch (selErr) {
+            return "";
           }
-        }
-        return lines.join("\n");
-      });
-    }
-
-      return await Excel.run(async (context) => {
-        const sheet = context.workbook.getActiveSheet();
-        let range = sheet.getUsedRange();
-        range.load(["values", "rowCount", "columnCount"]);
-
-        try {
-          await context.sync();
-        } catch (syncErr) {
-          // Si getUsedRange falla por hoja recién creada, respaldar en la selección actual
-          const sel = context.workbook.getSelectedRange();
-          sel.load(["values", "rowCount", "columnCount"]);
-          await context.sync();
-          range = sel;
         }
 
         if (!range.values || range.values.length === 0) return "";
@@ -232,9 +221,9 @@
         const lines = [];
         for (let r = 0; r < range.values.length; r++) {
           const row = range.values[r];
-          const hasData = row.some(cell => cell !== null && cell !== undefined && String(cell).trim() !== "");
+          const hasData = row.some(function(c) { return c !== null && c !== undefined && String(c).trim() !== ""; });
           if (hasData) {
-            const formattedRow = row.map(cell => (cell === null || cell === undefined ? "" : String(cell).trim())).join(" | ");
+            const formattedRow = row.map(function(c) { return (c !== null && c !== undefined) ? String(c).trim() : ""; }).join(" | ");
             lines.push(formattedRow);
           }
         }
@@ -242,8 +231,9 @@
       });
     }
 
+    // Extracción en Word
     async function getWordData() {
-      return await Word.run(async (context) => {
+      return await Word.run(async function(context) {
         const body = context.document.body;
         body.load("text");
         await context.sync();
@@ -251,8 +241,9 @@
       });
     }
 
+    // Extracción en PowerPoint
     async function getPowerPointData() {
-      return await PowerPoint.run(async (context) => {
+      return await PowerPoint.run(async function(context) {
         const slides = context.presentation.slides;
         slides.load("items");
         await context.sync();
@@ -264,7 +255,9 @@
           shapes.load("items");
           await context.sync();
 
-          for (let j = 0; j < shapes.items.length; j++) shapes.items[j].load("textFrame");
+          for (let j = 0; j < shapes.items.length; j++) {
+            shapes.items[j].load("textFrame");
+          }
           await context.sync();
 
           for (let j = 0; j < shapes.items.length; j++) {
@@ -286,7 +279,7 @@
             }
           }
           if (slideTexts.length > 0) {
-            fullPresentation.push(`[Diapositiva ${i + 1}]\n` + slideTexts.join("\n"));
+            fullPresentation.push("[Diapositiva " + (i + 1) + "]\n" + slideTexts.join("\n"));
           }
         }
         return fullPresentation.join("\n\n");
@@ -294,22 +287,15 @@
     }
 
     async function getDocumentContext() {
-      const host = Office.context.host;
-      if (host === Office.HostType.Excel || host === "Excel") return await getExcelData();
-      if (host === Office.HostType.Word || host === "Word") return await getWordData();
-      if (host === Office.HostType.PowerPoint || host === "PowerPoint") return await getPowerPointData();
-
-      // Detección por objeto global en caso de hosts no tipados
       if (typeof Excel !== "undefined" && Excel.run) return await getExcelData();
       if (typeof Word !== "undefined" && Word.run) return await getWordData();
       if (typeof PowerPoint !== "undefined" && PowerPoint.run) return await getPowerPointData();
-
-      throw new Error("No se pudo detectar el host de Office actual.");
+      throw new Error("No se pudo detectar el host de Office.");
     }
 
     function getSelectedTextAsync() {
-      return new Promise((resolve) => {
-        Office.context.document.getSelectedDataAsync(Office.CoercionType.Text, (result) => {
+      return new Promise(function(resolve) {
+        Office.context.document.getSelectedDataAsync(Office.CoercionType.Text, function(result) {
           if (result.status === Office.AsyncResultStatus.Succeeded && result.value && String(result.value).trim()) {
             resolve(String(result.value).trim());
           } else {
@@ -330,7 +316,7 @@
       setUIBusy(true, "Consultando a Gemini...");
 
       try {
-        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${key}`, {
+        const res = await fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=" + encodeURIComponent(key), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -348,7 +334,7 @@
         }
 
         const parts = data.candidates[0].content.parts;
-        const textPart = parts.find(p => p.text && !p.thought) || parts[parts.length - 1];
+        const textPart = parts.find(function(p) { return p.text && !p.thought; }) || parts[parts.length - 1];
         return textPart.text;
 
       } catch (err) {
@@ -393,7 +379,7 @@
       "- Si la respuesta no se encuentra en el archivo, responde: \"Esa información no aparece en el documento\".\n\n";
 
     // Botón: Preguntar / Analizar
-    document.getElementById("btnAsk").onclick = async () => {
+    document.getElementById("btnAsk").onclick = async function() {
       const promptText = document.getElementById("prompt").value.trim();
 
       if (chkFullDoc.checked) {
@@ -406,7 +392,7 @@
           setUIBusy(false);
           statusEl.className = "status-error";
           if (readErr.message && (readErr.message.includes("edit mode") || readErr.code === "InvalidOperationInCellEditMode")) {
-            statusEl.innerText = "Excel está editando una celda. Presiona ENTER o haz clic fuera de ella y reintenta.";
+            statusEl.innerText = "Excel está editando una celda. Presiona ENTER o ESC en la hoja y reintenta.";
           } else {
             statusEl.innerText = "Error al leer Excel: " + (readErr.message || readErr);
           }
@@ -417,7 +403,7 @@
 
         if (!contextData || !contextData.trim()) {
           statusEl.className = "status-error";
-          statusEl.innerText = "No se detectaron datos en la hoja activa. Escribe datos o selecciona un rango de celdas.";
+          statusEl.innerText = "No se detectaron datos en la hoja activa. Escribe datos o selecciona un rango.";
           return;
         }
 
@@ -425,7 +411,7 @@
 
         if (!promptText) {
           instruction = STRICT_FIDELITY_DIRECTIVE +
-            "Has recibido los siguientes datos de la hoja como contexto exclusivo:\n\n" +
+            "Has recibido los siguientes datos del archivo como contexto exclusivo:\n\n" +
             "--- INICIO DE DATOS ---\n" + contextData + "\n--- FIN DE DATOS ---\n\n" +
             "INSTRUCCIÓN:\n" +
             "1. Confirma brevemente que los datos han sido procesados.\n" +
@@ -433,7 +419,7 @@
             "3. Indica que quedas listo para responder preguntas sobre estos datos.";
         } else {
           instruction = STRICT_FIDELITY_DIRECTIVE +
-            "Datos de la hoja de cálculo de referencia:\n\n" +
+            "Datos de referencia del archivo:\n\n" +
             "--- INICIO DE DATOS ---\n" + contextData + "\n--- FIN DE DATOS ---\n\n" +
             "Pregunta del usuario: " + promptText;
         }
@@ -444,7 +430,7 @@
       } else {
         if (!promptText) {
           statusEl.className = "status-error";
-          statusEl.innerText = "Escribe una pregunta o activa la casilla de leer archivo.";
+          statusEl.innerText = "Escribe una pregunta o activa la casilla de contexto.";
           return;
         }
         const resp = await callGemini(promptText);
@@ -453,7 +439,7 @@
     };
 
     // Acciones automáticas
-    document.getElementById("btnRewrite").onclick = async () => {
+    document.getElementById("btnRewrite").onclick = async function() {
       const target = await resolveTargetText();
       if (!target) {
         statusEl.className = "status-error";
@@ -464,18 +450,18 @@
       if (resp) showInTaskpane(resp);
     };
 
-    document.getElementById("btnSummary").onclick = async () => {
+    document.getElementById("btnSummary").onclick = async function() {
       const target = await resolveTargetText();
       if (!target) {
         statusEl.className = "status-error";
         statusEl.innerText = "Selecciona celdas o activa la casilla de leer archivo.";
         return;
       }
-      const resp = await callGemini(STRICT_FIDELITY_DIRECTIVE + "Genera un resumen ejecutivo formal y estructurado en viñetas basándote exclusivamente en estos datos:\n\n" + target.text);
+      const resp = await callGemini(STRICT_FIDELITY_DIRECTIVE + "Genera un resumen ejecutivo formal en viñetas basándote exclusivamente en estos datos:\n\n" + target.text);
       if (resp) showInTaskpane(resp);
     };
 
-    document.getElementById("btnVerify").onclick = async () => {
+    document.getElementById("btnVerify").onclick = async function() {
       const target = await resolveTargetText();
       if (!target) {
         statusEl.className = "status-error";
@@ -486,7 +472,7 @@
       if (resp) showInTaskpane(resp);
     };
 
-    document.getElementById("btnTable").onclick = async () => {
+    document.getElementById("btnTable").onclick = async function() {
       const target = await resolveTargetText();
       if (!target) {
         statusEl.className = "status-error";
@@ -497,21 +483,21 @@
       if (resp) showInTaskpane(resp);
     };
 
-    // Copiar
-    document.getElementById("btnCopy").onclick = () => {
-      navigator.clipboard.writeText(currentRawResponse).then(() => {
+    // Copiar al portapapeles
+    document.getElementById("btnCopy").onclick = function() {
+      navigator.clipboard.writeText(currentRawResponse).then(function() {
         statusEl.innerText = "¡Copiado al portapapeles!";
-        setTimeout(() => statusEl.innerText = "", 2500);
+        setTimeout(function() { statusEl.innerText = ""; }, 2500);
       });
     };
 
     // Insertar
-    document.getElementById("btnInsert").onclick = () => {
+    document.getElementById("btnInsert").onclick = function() {
       if (!currentRawResponse) return;
-      Office.context.document.setSelectedDataAsync(currentRawResponse, { coercionType: Office.CoercionType.Text }, (res) => {
+      Office.context.document.setSelectedDataAsync(currentRawResponse, { coercionType: Office.CoercionType.Text }, function(res) {
         if (res.status === Office.AsyncResultStatus.Succeeded) {
           statusEl.innerText = "Insertado exitosamente.";
-          setTimeout(() => statusEl.innerText = "", 2500);
+          setTimeout(function() { statusEl.innerText = ""; }, 2500);
         } else {
           statusEl.className = "status-error";
           statusEl.innerText = "Error al insertar: " + res.error.message;
