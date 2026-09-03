@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<OfficeApp xmlns="http://schemas.microsoft.com/office/appforoffice/1.1"
+           xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+           xsi:type="TaskPaneApp">
+  <Id>b7c2a1e4-9d5f-4a3b-8e1c-d4e5f6a7b8c9</Id>
+  <Version>1.0.0.0</Version>
+  <ProviderName>Personal</ProviderName>
+  <DefaultLocale>es-ES</DefaultLocale>
+  <DisplayName DefaultValue="Panel IA Gemini" />
+  <Description DefaultValue="Asistente de IA para documentos" />
+  <IconUrl DefaultValue="https://assets.msn.com/staticsb/statics/latest/bing/copilot/favicon.png" />
+  <SupportUrl DefaultValue="https://lapermm.github.io/Gemini-Word/" />
+  <Hosts>
+    <Host Name="Document" />
+  </Hosts>
+  <DefaultSettings>
+    <SourceLocation DefaultValue="https://lapermm.github.io/Gemini-Word/" />
+  </DefaultSettings>
+  <Permissions>ReadWriteDocument</Permissions>
+</OfficeApp>
