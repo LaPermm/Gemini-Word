@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
-  <!-- Librería para dar formato a tablas, listas y negritas en el panel -->
+  <!-- Librería para renderizar tablas y texto enriquecido en el panel -->
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <style>
     body {
@@ -68,7 +68,7 @@
     .status-wait { color: #e37400; font-weight: 500; }
     .status-error { color: #d93025; font-weight: 500; }
 
-    /* Contenedor de respuesta dentro del panel */
+    /* Panel interno de visualización de respuesta */
     #responseCard {
       display: none;
       background: #ffffff;
@@ -121,7 +121,7 @@
 
   <h4>Asistente Gemini</h4>
   <input type="password" id="apiKey" placeholder="API Key de Gemini" />
-  <textarea id="prompt" placeholder="Haz una pregunta o da una instrucción..."></textarea>
+  <textarea id="prompt" placeholder="Haz una pregunta o deja en blanco para inicializar el contexto..."></textarea>
 
   <label class="context-toggle">
     <input type="checkbox" id="chkFullDoc">
@@ -143,7 +143,7 @@
 
   <div id="status"></div>
 
-  <!-- Panel interno de respuesta -->
+  <!-- Panel de respuesta -->
   <div id="responseCard">
     <div id="responseHeader">
       <span style="font-weight: 600; color: #3c4043;">Respuesta:</span>
@@ -179,29 +179,41 @@
       return key;
     }
 
-   async function getDocumentContext() {
+    // Extrae el contenido global en Word, Excel o PowerPoint de forma segura
+    async function getDocumentContext() {
       try {
-        // 1. Caso Microsoft Word
-        if (Office.context.host === Office.HostType.Word) {
+        const host = Office.context.diagnostics ? Office.context.diagnostics.host : Office.context.host;
+
+        // 1. Microsoft Word
+        if (host === "Word" || Office.context.host === Office.HostType.Word) {
           return await Word.run(async (context) => {
             const body = context.document.body;
             body.load("text");
             await context.sync();
-            return body.text.trim();
+            return body.text ? body.text.trim() : "";
           });
         } 
-        // 2. Caso Microsoft Excel
-        else if (Office.context.host === Office.HostType.Excel) {
+        // 2. Microsoft Excel
+        else if (host === "Excel" || Office.context.host === Office.HostType.Excel) {
           return await Excel.run(async (context) => {
             const sheet = context.workbook.getActiveSheet();
-            const range = sheet.getUsedRange();
-            range.load("values");
+            const range = sheet.getUsedRangeOrNullObject();
+            range.load(["values", "isNullObject"]);
             await context.sync();
-            return range.values.map(row => row.join(" | ")).join("\n");
+
+            if (range.isNullObject || !range.values || range.values.length === 0) {
+              return "";
+            }
+
+            const rows = range.values
+              .filter(row => row.some(cell => cell !== "" && cell !== null && cell !== undefined))
+              .map(row => row.map(cell => (cell === null || cell === undefined) ? "" : cell).join(" | "));
+
+            return rows.join("\n");
           });
         } 
-        // 3. Caso Microsoft PowerPoint
-        else if (Office.context.host === Office.HostType.PowerPoint) {
+        // 3. Microsoft PowerPoint
+        else if (host === "PowerPoint" || Office.context.host === Office.HostType.PowerPoint) {
           return await PowerPoint.run(async (context) => {
             const slides = context.presentation.slides;
             slides.load("items");
@@ -215,7 +227,6 @@
               shapes.load("items");
               await context.sync();
 
-              // Cargar cuadros de texto de cada forma en la diapositiva
               for (let j = 0; j < shapes.items.length; j++) {
                 shapes.items[j].load("textFrame");
               }
@@ -253,12 +264,14 @@
           });
         }
       } catch (err) {
-        console.warn("No se pudo leer el contexto completo del archivo:", err);
+        statusEl.className = "status-error";
+        statusEl.innerText = "Error al leer archivo: " + err.message;
+        return "";
       }
       return "";
     }
 
-    // Obtener texto seleccionado (fallback)
+    // Obtener texto seleccionado manualmente
     function getSelectedTextAsync() {
       return new Promise((resolve) => {
         Office.context.document.getSelectedDataAsync(Office.CoercionType.Text, (result) => {
@@ -318,7 +331,6 @@
       statusEl.innerText = "";
     }
 
-    // Determina si se procesa la selección o todo el documento
     async function resolveTargetText() {
       const selection = await getSelectedTextAsync();
       if (selection) return { text: selection, isFullDoc: false };
@@ -332,12 +344,16 @@
       return null;
     }
 
-    // Botón: Preguntar / Chat
+    // Directiva base de fidelidad estricta compartida
+    const STRICT_FIDELITY_DIRECTIVE = 
+      "DIRECTIVA DE FIDELIDAD ESTRICTA:\n" +
+      "- Responde ÚNICA Y EXCLUSIVAMENTE basándote en la información explícitamente redactada en el documento proporcionado.\n" +
+      "- Prohibido inferir, suponer o incorporar conocimientos externos que no figuren en el texto.\n" +
+      "- Si la respuesta a una pregunta o dato no se encuentra en el documento, indica expresamente: \"Esa información no aparece en el documento\".\n\n";
+
+    // Botón: Preguntar / Analizar (Con inicialización automática)
     document.getElementById("btnAsk").onclick = async () => {
       const promptText = document.getElementById("prompt").value.trim();
-      if (!promptText) return;
-
-      let instruction = promptText;
 
       if (chkFullDoc.checked) {
         setUIBusy(true, "Leyendo archivo completo...");
@@ -346,17 +362,43 @@
 
         if (!contextData) {
           statusEl.className = "status-error";
-          statusEl.innerText = "El documento parece estar vacío.";
+          statusEl.innerText = "El archivo actual parece estar vacío o sin celdas activas.";
           return;
         }
 
-        instruction = `Actúa como un analista experto. Responde la siguiente pregunta basándote estrictamente en el contenido del archivo adjunto a continuación. Si la respuesta no está presente en el texto, acláralo expresamente.\n\n` +
-          `--- INICIO DEL ARCHIVO ---\n${contextData}\n--- FIN DEL ARCHIVO ---\n\n` +
-          `Pregunta del usuario: ${promptText}`;
-      }
+        let instruction = "";
 
-      const resp = await callGemini(instruction);
-      if (resp) showInTaskpane(resp);
+        // CASO A: Se presionó sin pregunta -> Inicializar y confirmar lectura
+        if (!promptText) {
+          instruction = STRICT_FIDELITY_DIRECTIVE +
+            "Has recibido el siguiente archivo como contexto documental exclusivo:\n\n" +
+            "--- INICIO DEL ARCHIVO ---\n" + contextData + "\n--- FIN DEL ARCHIVO ---\n\n" +
+            "INSTRUCCIÓN:\n" +
+            "1. Confirma brevemente que el archivo ha sido leído y procesado exitosamente.\n" +
+            "2. Presenta un resumen muy conciso (3 o 4 viñetas clave) indicando de qué trata el documento y qué temas o datos principales contiene.\n" +
+            "3. Indica que estás listo para responder preguntas específicas bajo la directiva de fidelidad estricta.";
+        } 
+        // CASO B: Hay una pregunta escrita por el usuario
+        else {
+          instruction = STRICT_FIDELITY_DIRECTIVE +
+            "Contenido del archivo de referencia:\n\n" +
+            "--- INICIO DEL ARCHIVO ---\n" + contextData + "\n--- FIN DEL ARCHIVO ---\n\n" +
+            "Pregunta del usuario: " + promptText;
+        }
+
+        const resp = await callGemini(instruction);
+        if (resp) showInTaskpane(resp);
+
+      } else {
+        // Modo libre sin contexto de archivo
+        if (!promptText) {
+          statusEl.className = "status-error";
+          statusEl.innerText = "Escribe una pregunta o activa la casilla de leer todo el archivo.";
+          return;
+        }
+        const resp = await callGemini(promptText);
+        if (resp) showInTaskpane(resp);
+      }
     };
 
     // Botón: Reescribir
@@ -367,7 +409,7 @@
         statusEl.innerText = "Selecciona texto o activa la casilla de leer todo el archivo.";
         return;
       }
-      const resp = await callGemini("Mejora la redacción, estilo profesional, claridad y ortografía del siguiente texto manteniendo el sentido original:\n\n" + target.text);
+      const resp = await callGemini("Mejora la redacción, estilo profesional, claridad y ortografía del siguiente texto manteniendo fielmente el sentido original:\n\n" + target.text);
       if (resp) showInTaskpane(resp);
     };
 
@@ -379,7 +421,7 @@
         statusEl.innerText = "Selecciona texto o activa la casilla de leer todo el archivo.";
         return;
       }
-      const resp = await callGemini("Genera un resumen ejecutivo formal, estructurado con puntos clave y conclusiones principales del siguiente contenido:\n\n" + target.text);
+      const resp = await callGemini(STRICT_FIDELITY_DIRECTIVE + "Genera un resumen ejecutivo formal y estructurado en viñetas basándote exclusivamente en este texto:\n\n" + target.text);
       if (resp) showInTaskpane(resp);
     };
 
@@ -391,7 +433,7 @@
         statusEl.innerText = "Selecciona texto o activa la casilla de leer todo el archivo.";
         return;
       }
-      const resp = await callGemini("Actúa como revisor crítico e imparcial. Analiza el siguiente contenido y detalla: 1) Coherencia lógica y vacíos argumentales, 2) Inconsistencias o datos dudosos, y 3) Recomendaciones puntuales para reforzarlo:\n\n" + target.text);
+      const resp = await callGemini(STRICT_FIDELITY_DIRECTIVE + "Actúa como revisor crítico y objetivo. Analiza la coherencia interna del siguiente texto y detalla: 1) Coherencia lógica y vacíos argumentales, 2) Inconsistencias o contradicciones directas, y 3) Recomendaciones puntuales para reforzarlo:\n\n" + target.text);
       if (resp) showInTaskpane(resp);
     };
 
@@ -403,7 +445,7 @@
         statusEl.innerText = "Selecciona texto o activa la casilla de leer todo el archivo.";
         return;
       }
-      const resp = await callGemini("Extrae los datos estructurados o comparativos del siguiente contenido y organízalos en una tabla Markdown con encabezados claros:\n\n" + target.text);
+      const resp = await callGemini(STRICT_FIDELITY_DIRECTIVE + "Extrae los datos estructurados o comparativos del siguiente contenido y organízalos en una tabla Markdown con encabezados claros:\n\n" + target.text);
       if (resp) showInTaskpane(resp);
     };
 
@@ -415,7 +457,7 @@
       });
     };
 
-    // Botón: Insertar en Word o Excel
+    // Botón: Insertar
     document.getElementById("btnInsert").onclick = () => {
       if (!currentRawResponse) return;
       Office.context.document.setSelectedDataAsync(currentRawResponse, { coercionType: Office.CoercionType.Text }, (res) => {
